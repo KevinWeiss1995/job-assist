@@ -7,7 +7,7 @@ name = "job-assist"
 version = "0.1.0"
 description = "Interactive SLURM sbatch script generator for HPC clusters"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [{ name = "HPC Team" }]
 classifiers = [
