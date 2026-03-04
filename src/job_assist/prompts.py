@@ -177,8 +177,6 @@ def _gpu_type_choices(
 
 
 def _default_email(cluster: ClusterInfo) -> str:
-    if cluster.email_domain:
-        return f"{cluster.username}@{cluster.email_domain}"
     return ""
 
 
