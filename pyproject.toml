@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: System :: Systems Administration",
 ]
 dependencies = [
-    "questionary>=2.0.0",
+    "questionary>=2.0.0,<2.1.0",
 ]
 
 [project.scripts]

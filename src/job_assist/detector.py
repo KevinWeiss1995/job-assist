@@ -401,18 +401,53 @@ def _detect_qos(info: ClusterInfo) -> None:
 
 
 def _detect_gpu_types(info: ClusterInfo) -> None:
-    """Detect specific GPU types available via sinfo GRES."""
-    out, err = _run(["sinfo", "-o", "%G", "--noheader"])
+    """Detect specific GPU types from node-level GRES.
+
+    Partition-level sinfo often shows just 'gpu' without type info.
+    Node-level output (sinfo -N) or scontrol show node exposes the actual
+    GPU models (v100, a100, l40s, etc.).
+    """
+    gpu_types: Set[str] = set()
+    partition_gpu_types: Dict[str, Set[str]] = {}
+
+    out, err = _run(["sinfo", "-N", "-o", "%N|%P|%G", "--noheader"])
     if err or not out:
+        out2, err2 = _run(["scontrol", "show", "node", "-o"])
+        if err2 or not out2:
+            info.detection_errors.append(f"GPU type detection failed: {err}")
+            return
+        for line in out2.strip().splitlines():
+            kv = _parse_key_value_block(line)
+            gres_str = kv.get("Gres", "")
+            for gres in _parse_gres_string(gres_str):
+                if gres.name == "gpu" and gres.gres_type:
+                    gpu_types.add(gres.gres_type)
+        info.gpu_types = sorted(gpu_types)
         return
 
-    gpu_types: Set[str] = set()
     for line in out.strip().splitlines():
-        for gres in _parse_gres_string(line.strip()):
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        pname = parts[1].strip().rstrip("*")
+        gres_str = parts[2].strip()
+        for gres in _parse_gres_string(gres_str):
             if gres.name == "gpu" and gres.gres_type:
                 gpu_types.add(gres.gres_type)
+                partition_gpu_types.setdefault(pname, set()).add(gres.gres_type)
 
     info.gpu_types = sorted(gpu_types)
+
+    partition_map = {p.name: p for p in info.partitions}
+    for pname, types in partition_gpu_types.items():
+        p = partition_map.get(pname)
+        if not p:
+            continue
+        existing_types = {g.gres_type for g in p.gres if g.name == "gpu" and g.gres_type}
+        if not existing_types:
+            p.gres = [g for g in p.gres if g.name != "gpu"]
+            for gpu_type in sorted(types):
+                p.gres.append(GresResource(name="gpu", gres_type=gpu_type))
 
 
 def detect_cluster() -> ClusterInfo:
