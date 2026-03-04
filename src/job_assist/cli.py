@@ -20,29 +20,39 @@ def _print_cluster_info(cluster: ClusterInfo) -> None:
     """Dump detected cluster info (for --detect-only)."""
     print(f"Cluster:        {cluster.cluster_name or 'unknown'}")
     print(f"SLURM version:  {cluster.slurm_version or 'unknown'}")
+    print(f"Hostname:       {cluster.hostname or 'unknown'}")
+    print(f"Email domain:   {cluster.email_domain or 'unknown'}")
     print(f"TRES enabled:   {cluster.tres_enabled}")
     print(f"GPU available:  {cluster.gpu_available}")
     if cluster.gpu_types:
         print(f"GPU types:      {', '.join(cluster.gpu_types)}")
     print()
 
-    if cluster.partitions:
-        print("Partitions:")
-        for p in cluster.partitions:
+    if cluster.gpu_partitions:
+        print("GPU Partitions:")
+        for p in cluster.gpu_partitions:
             default = " (default)" if p.is_default else ""
-            gpu_info = ""
-            if p.gres:
-                gpus = [str(g) for g in p.gres if g.name == "gpu"]
-                if gpus:
-                    gpu_info = f"  gpu=[{', '.join(gpus)}]"
+            gpu_types = f"  [{', '.join(p.gpu_types)}]" if p.gpu_types else ""
             print(
                 f"  {p.name:<20}{default:<12}"
                 f"nodes={p.total_nodes:<6}"
                 f"max_time={p.max_time or 'unlimited':<16}"
                 f"mem={p.max_mem_per_node or '?'}MB"
-                f"{gpu_info}"
+                f"{gpu_types}"
             )
-    print()
+        print()
+
+    if cluster.cpu_partitions:
+        print("CPU Partitions:")
+        for p in cluster.cpu_partitions:
+            default = " (default)" if p.is_default else ""
+            print(
+                f"  {p.name:<20}{default:<12}"
+                f"nodes={p.total_nodes:<6}"
+                f"max_time={p.max_time or 'unlimited':<16}"
+                f"mem={p.max_mem_per_node or '?'}MB"
+            )
+        print()
 
     if cluster.accounts:
         print("Your accounts:")
