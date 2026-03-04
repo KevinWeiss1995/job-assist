@@ -209,14 +209,33 @@ def _detect_slurm_present() -> bool:
 
 
 def _detect_hostname_and_email(info: ClusterInfo) -> None:
-    """Detect hostname and infer email domain from FQDN."""
+    """Detect hostname and infer email domain from FQDN or system config."""
     try:
         info.hostname = socket.gethostname()
         fqdn = socket.getfqdn()
         parts = fqdn.split(".", 1)
         if len(parts) > 1 and "." in parts[1]:
             info.email_domain = parts[1]
+            return
     except Exception:
+        pass
+
+    # FQDN didn't have a domain — try `hostname -d` and /etc/resolv.conf
+    out, _ = _run(["hostname", "-d"])
+    if out and "." in out:
+        info.email_domain = out.strip()
+        return
+
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(("domain ", "search ")):
+                    domain = line.split()[1] if len(line.split()) > 1 else ""
+                    if "." in domain:
+                        info.email_domain = domain
+                        return
+    except (OSError, IndexError):
         pass
 
 
@@ -424,43 +443,108 @@ def _detect_qos(info: ClusterInfo) -> None:
         info.qos_list.append(qos)
 
 
-def _detect_gpu_types(info: ClusterInfo) -> None:
-    """Detect GPU types from node-level GRES and map them to partitions.
+KNOWN_GPU_MODELS: Set[str] = {
+    # NVIDIA data center
+    "a100", "a30", "a40", "a6000", "a5000", "a4000", "a2",
+    "h100", "h200", "h800",
+    "l40", "l40s", "l4",
+    "v100", "v100s",
+    "t4",
+    "p100", "p40",
+    "k80", "k40",
+    "b100", "b200", "gb200",
+    # NVIDIA consumer/workstation (sometimes on clusters)
+    "rtx2080", "rtx2080ti", "rtx3080", "rtx3090",
+    "rtx4070", "rtx4080", "rtx4090",
+    "rtxa6000", "rtxa5000", "rtxa4000",
+    # AMD Instinct
+    "mi50", "mi100", "mi200", "mi210", "mi250", "mi250x", "mi300", "mi300x",
+}
 
-    Partition-level sinfo often shows just 'gpu' without the type.
-    Node-level queries expose the actual GPU models (v100, a100, l40s, etc.).
+
+def _match_gpu_in_features(features: Set[str]) -> Set[str]:
+    """Find known GPU model names in a set of node features."""
+    found: Set[str] = set()
+    for feat in features:
+        normalized = feat.strip().lower().replace("-", "").replace("_", "")
+        if normalized in KNOWN_GPU_MODELS:
+            found.add(feat.strip().lower())
+    return found
+
+
+def _detect_gpu_types(info: ClusterInfo) -> None:
+    """Detect GPU types via a multi-phase strategy and map them to partitions.
+
+    Phase 1: sinfo -N with features — fast, gets GRES types + feature-based types
+    Phase 2: scontrol show node — authoritative GRES types (often has types sinfo omits)
+    Phase 3: Cross-reference node features with known GPU model names
     """
     gpu_types: Set[str] = set()
     partition_gpu_types: Dict[str, Set[str]] = {}
+    node_to_partitions: Dict[str, Set[str]] = {}
 
-    out, err = _run(["sinfo", "-N", "-o", "%N|%P|%G", "--noheader"])
-    if err or not out:
-        out2, err2 = _run(["scontrol", "show", "node", "-o"])
-        if err2 or not out2:
-            info.detection_errors.append(f"GPU type detection failed: {err}")
-            return
-        for line in out2.strip().splitlines():
-            kv = _parse_key_value_block(line)
-            gres_str = kv.get("Gres", "")
+    # Phase 1: sinfo -N with GRES + features in one call
+    out, err = _run(["sinfo", "-N", "-o", "%N|%P|%G|%f", "--noheader"])
+    if out:
+        for line in out.strip().splitlines():
+            parts = line.split("|")
+            if len(parts) < 4:
+                continue
+            node = parts[0].strip()
+            pname = parts[1].strip().rstrip("*")
+            gres_str = parts[2].strip()
+            features_str = parts[3].strip()
+
+            node_to_partitions.setdefault(node, set()).add(pname)
+
             for gres in _parse_gres_string(gres_str):
                 if gres.name == "gpu" and gres.gres_type:
                     gpu_types.add(gres.gres_type)
-        info.gpu_types = sorted(gpu_types)
-        return
+                    partition_gpu_types.setdefault(pname, set()).add(gres.gres_type)
 
-    for line in out.strip().splitlines():
-        parts = line.split("|")
-        if len(parts) < 3:
-            continue
-        pname = parts[1].strip().rstrip("*")
-        gres_str = parts[2].strip()
-        for gres in _parse_gres_string(gres_str):
-            if gres.name == "gpu" and gres.gres_type:
-                gpu_types.add(gres.gres_type)
-                partition_gpu_types.setdefault(pname, set()).add(gres.gres_type)
+            if features_str and features_str != "(null)":
+                node_features = {f.strip() for f in features_str.split(",") if f.strip()}
+                matched = _match_gpu_in_features(node_features)
+                for model in matched:
+                    gpu_types.add(model)
+                    partition_gpu_types.setdefault(pname, set()).add(model)
+
+    # Phase 2: scontrol show node — exposes typed GRES that sinfo may summarize away
+    # Only run if we have GPU partitions but found few types (the common failure mode)
+    gpu_partition_count = len([p for p in info.partitions if p.has_gpu])
+    if info.gpu_available and len(gpu_types) < gpu_partition_count:
+        out2, err2 = _run(["scontrol", "show", "node", "-o"], timeout=30)
+        if out2:
+            for line in out2.strip().splitlines():
+                kv = _parse_key_value_block(line)
+                node_name = kv.get("NodeName", "")
+                gres_str = kv.get("Gres", "")
+
+                for gres in _parse_gres_string(gres_str):
+                    if gres.name == "gpu" and gres.gres_type:
+                        gpu_types.add(gres.gres_type)
+                        for pname in node_to_partitions.get(node_name, set()):
+                            partition_gpu_types.setdefault(pname, set()).add(
+                                gres.gres_type
+                            )
+
+                # Phase 3: node AvailableFeatures from scontrol (more complete than sinfo)
+                avail_feat = kv.get("AvailableFeatures", "")
+                if avail_feat and avail_feat != "(null)":
+                    node_features = {
+                        f.strip() for f in avail_feat.split(",") if f.strip()
+                    }
+                    matched = _match_gpu_in_features(node_features)
+                    for model in matched:
+                        gpu_types.add(model)
+                        for pname in node_to_partitions.get(node_name, set()):
+                            partition_gpu_types.setdefault(pname, set()).add(model)
+        elif err2:
+            info.detection_errors.append(f"scontrol show node: {err2}")
 
     info.gpu_types = sorted(gpu_types)
 
+    # Map discovered types back to partition objects
     partition_map = {p.name: p for p in info.partitions}
     for pname, types in partition_gpu_types.items():
         p = partition_map.get(pname)
