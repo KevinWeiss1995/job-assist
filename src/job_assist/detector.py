@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -39,7 +40,7 @@ class Partition:
     name: str
     is_default: bool = False
     state: str = "UP"
-    max_time: Optional[str] = None  # timelimit string e.g. "7-00:00:00"
+    max_time: Optional[str] = None
     default_time: Optional[str] = None
     max_nodes: Optional[int] = None
     max_cpus_per_node: Optional[int] = None
@@ -50,11 +51,20 @@ class Partition:
     cpus_per_node: Optional[int] = None
     gres: List[GresResource] = field(default_factory=list)
     features: Set[str] = field(default_factory=set)
-    allow_accounts: Optional[List[str]] = None  # None means all
+    gpu_types: List[str] = field(default_factory=list)
+    allow_accounts: Optional[List[str]] = None
     deny_accounts: Optional[List[str]] = None
     allow_qos: Optional[List[str]] = None
     deny_qos: Optional[List[str]] = None
-    qos: Optional[str] = None  # partition QOS
+    qos: Optional[str] = None
+
+    @property
+    def has_gpu(self) -> bool:
+        return any(g.name == "gpu" for g in self.gres)
+
+    @property
+    def max_gpus_per_node(self) -> int:
+        return max((g.count for g in self.gres if g.name == "gpu"), default=0)
 
 
 @dataclass
@@ -87,6 +97,8 @@ class ClusterInfo:
 
     cluster_name: Optional[str] = None
     slurm_version: Optional[str] = None
+    hostname: Optional[str] = None
+    email_domain: Optional[str] = None
     partitions: List[Partition] = field(default_factory=list)
     default_partition: Optional[str] = None
     accounts: List[AccountInfo] = field(default_factory=list)
@@ -103,6 +115,18 @@ class ClusterInfo:
     @property
     def partition_names(self) -> List[str]:
         return [p.name for p in self.partitions if p.state == "UP"]
+
+    @property
+    def gpu_partitions(self) -> List[Partition]:
+        return [p for p in self.partitions if p.has_gpu and p.state == "UP"]
+
+    @property
+    def cpu_partitions(self) -> List[Partition]:
+        return [p for p in self.partitions if not p.has_gpu and p.state == "UP"]
+
+    @property
+    def username(self) -> str:
+        return os.environ.get("USER", os.environ.get("LOGNAME", ""))
 
 
 def _run(cmd: List[str], timeout: int = 15) -> Tuple[Optional[str], Optional[str]]:
@@ -134,16 +158,6 @@ def _parse_key_value_block(text: str) -> Dict[str, str]:
             key, _, value = token.partition("=")
             result[key.strip()] = value.strip()
     return result
-
-
-def _parse_scontrol_blocks(text: str) -> List[Dict[str, str]]:
-    """Parse multi-record scontrol output into a list of dicts."""
-    blocks = []
-    for block in re.split(r"\n\n+", text.strip()):
-        if block.strip():
-            merged = " ".join(block.split("\n"))
-            blocks.append(_parse_key_value_block(merged))
-    return blocks
 
 
 def _parse_gres_string(gres_str: str) -> List[GresResource]:
@@ -191,8 +205,19 @@ def _parse_mem_string(mem_str: str) -> Optional[int]:
 
 
 def _detect_slurm_present() -> bool:
-    """Check if SLURM commands are available."""
     return shutil.which("sinfo") is not None
+
+
+def _detect_hostname_and_email(info: ClusterInfo) -> None:
+    """Detect hostname and infer email domain from FQDN."""
+    try:
+        info.hostname = socket.gethostname()
+        fqdn = socket.getfqdn()
+        parts = fqdn.split(".", 1)
+        if len(parts) > 1 and "." in parts[1]:
+            info.email_domain = parts[1]
+    except Exception:
+        pass
 
 
 def _detect_cluster_config(info: ClusterInfo) -> None:
@@ -284,7 +309,7 @@ def _detect_partition_resources(info: ClusterInfo) -> None:
         return
 
     partition_map = {p.name: p for p in info.partitions}
-    seen = set()
+    seen: Set[str] = set()
 
     for line in out.strip().splitlines():
         parts = line.split("|")
@@ -305,9 +330,8 @@ def _detect_partition_resources(info: ClusterInfo) -> None:
             if g.name == "gpu":
                 info.gpu_available = True
                 info.gres_types.add("gpu")
-                if g.gres_type:
-                    if g.gres_type not in info.gpu_types:
-                        info.gpu_types.append(g.gres_type)
+                if g.gres_type and g.gres_type not in info.gpu_types:
+                    info.gpu_types.append(g.gres_type)
 
         features_str = parts[2].strip()
         if features_str and features_str != "(null)":
@@ -327,7 +351,7 @@ def _detect_partition_resources(info: ClusterInfo) -> None:
 
 def _detect_accounts(info: ClusterInfo) -> None:
     """Detect user's available accounts and associated QOS via sacctmgr."""
-    user = os.environ.get("USER", os.environ.get("LOGNAME", ""))
+    user = info.username
     if not user:
         info.detection_errors.append("Cannot determine username for account lookup")
         return
@@ -401,11 +425,10 @@ def _detect_qos(info: ClusterInfo) -> None:
 
 
 def _detect_gpu_types(info: ClusterInfo) -> None:
-    """Detect specific GPU types from node-level GRES.
+    """Detect GPU types from node-level GRES and map them to partitions.
 
-    Partition-level sinfo often shows just 'gpu' without type info.
-    Node-level output (sinfo -N) or scontrol show node exposes the actual
-    GPU models (v100, a100, l40s, etc.).
+    Partition-level sinfo often shows just 'gpu' without the type.
+    Node-level queries expose the actual GPU models (v100, a100, l40s, etc.).
     """
     gpu_types: Set[str] = set()
     partition_gpu_types: Dict[str, Set[str]] = {}
@@ -443,6 +466,7 @@ def _detect_gpu_types(info: ClusterInfo) -> None:
         p = partition_map.get(pname)
         if not p:
             continue
+        p.gpu_types = sorted(types)
         existing_types = {g.gres_type for g in p.gres if g.name == "gpu" and g.gres_type}
         if not existing_types:
             p.gres = [g for g in p.gres if g.name != "gpu"]
@@ -453,11 +477,13 @@ def _detect_gpu_types(info: ClusterInfo) -> None:
 def detect_cluster() -> ClusterInfo:
     """Run full cluster detection and return a ClusterInfo object.
 
-    Safe to call on non-SLURM systems — will return a mostly-empty ClusterInfo
+    Safe to call on non-SLURM systems — returns a mostly-empty ClusterInfo
     with has_slurm=False.
     """
     info = ClusterInfo()
     info.has_slurm = _detect_slurm_present()
+
+    _detect_hostname_and_email(info)
 
     if not info.has_slurm:
         info.detection_errors.append("SLURM commands not found in PATH")
