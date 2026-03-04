@@ -232,29 +232,10 @@ def gather_parameters(cluster: ClusterInfo) -> JobParameters:
 
     is_gpu = params.job_type == "gpu"
 
-    # ── Account ──
-    if cluster.accounts:
-        print()
-        questionary.print("── Account & Partition ──", style="bold fg:yellow")
-        if len(cluster.accounts) == 1:
-            params.account = cluster.accounts[0].name
-            questionary.print(
-                f"  SLURM account: {params.account}", style="fg:ansibrightblack"
-            )
-        else:
-            default_acct = cluster.default_account or cluster.accounts[0].name
-            params.account = _ask_or_abort(questionary.select(
-                "SLURM account (project/allocation):",
-                choices=_account_choices(cluster),
-                default=default_acct,
-                style=STYLE,
-            ))
-
     # ── Partition ──
     if cluster.partitions:
-        if not cluster.accounts:
-            print()
-            questionary.print("── Account & Partition ──", style="bold fg:yellow")
+        print()
+        questionary.print("── Partition ──", style="bold fg:yellow")
 
         if is_gpu:
             relevant = cluster.gpu_partitions
@@ -290,19 +271,6 @@ def gather_parameters(cluster: ClusterInfo) -> JobParameters:
     selected_partition = (
         _get_partition(cluster, params.partition) if params.partition else None
     )
-
-    # ── QOS ──
-    available_qos = _qos_choices(cluster, params.account)
-    if available_qos:
-        use_qos = _ask_or_abort(
-            questionary.confirm("Specify a QOS?", default=False, style=STYLE)
-        )
-        if use_qos:
-            params.qos = _ask_or_abort(questionary.select(
-                "QOS:",
-                choices=available_qos,
-                style=STYLE,
-            ))
 
     # ── Resources (GPU path) ──
     if is_gpu:
