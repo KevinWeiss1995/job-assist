@@ -239,13 +239,19 @@ def gather_parameters(cluster: ClusterInfo) -> JobParameters:
     if cluster.accounts:
         print()
         questionary.print("── Account & Partition ──", style="bold fg:yellow")
-        default_acct = cluster.default_account or cluster.accounts[0].name
-        params.account = _ask_or_abort(questionary.select(
-            "Account:",
-            choices=_account_choices(cluster),
-            default=default_acct,
-            style=STYLE,
-        ))
+        if len(cluster.accounts) == 1:
+            params.account = cluster.accounts[0].name
+            questionary.print(
+                f"  SLURM account: {params.account}", style="fg:ansibrightblack"
+            )
+        else:
+            default_acct = cluster.default_account or cluster.accounts[0].name
+            params.account = _ask_or_abort(questionary.select(
+                "SLURM account (project/allocation):",
+                choices=_account_choices(cluster),
+                default=default_acct,
+                style=STYLE,
+            ))
 
     # ── Partition ──
     if cluster.partitions:
