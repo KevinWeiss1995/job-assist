@@ -177,10 +177,9 @@ def _gpu_type_choices(
 
 
 def _default_email(cluster: ClusterInfo) -> str:
-    user = cluster.username
     if cluster.email_domain:
-        return f"{user}@{cluster.email_domain}"
-    return f"{user}@" if user else ""
+        return f"{cluster.username}@{cluster.email_domain}"
+    return ""
 
 
 def _ask_or_abort(question: questionary.Question) -> str:
