@@ -161,11 +161,16 @@ def _parse_key_value_block(text: str) -> Dict[str, str]:
 
 
 def _parse_gres_string(gres_str: str) -> List[GresResource]:
-    """Parse a GRES string like 'gpu:a100:4,gpu:v100:2' into GresResource objects."""
+    """Parse a GRES string like 'gpu:a100:4,gpu:v100:2' into GresResource objects.
+
+    Handles SLURM socket binding suffixes like gpu:v100:4(S:0) and
+    gpu:a100:8(S:0-1) by stripping them before parsing.
+    """
     resources = []
     if not gres_str or gres_str in ("(null)", "N/A"):
         return resources
     for entry in gres_str.split(","):
+        entry = re.sub(r"\(S:[^)]*\)", "", entry.strip())
         parts = entry.strip().split(":")
         if not parts or not parts[0]:
             continue
