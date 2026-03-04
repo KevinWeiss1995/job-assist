@@ -103,9 +103,6 @@ def generate_script(params: JobParameters) -> str:
 
     # ── Environment setup ──
     lines.append("# ── Environment setup ──")
-    lines.append("set -euo pipefail")
-    lines.append("")
-
     lines.append('echo "Job $SLURM_JOB_ID started on $(hostname) at $(date)"')
     if is_gpu:
         lines.append(
